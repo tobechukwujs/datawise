@@ -1,6 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readFile } from 'fs/promises';
-import path from 'path';
 import { z } from 'zod';
 import { prisma } from '@/lib/prisma';
 import { generateDashboard } from '@/lib/anthropic';
@@ -12,18 +10,10 @@ import type { AIChart, ChartConfig, ChartWithData, DataPoint } from '@/types/das
 
 export const runtime = 'nodejs';
 
-const UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
-
 const bodySchema = z.object({
   datasetId: z.string().min(1).max(128),
   prompt: z.string().min(1).max(2000),
 });
-
-function resolveUploadPath(filePath: string): string | null {
-  const resolved = path.resolve(process.cwd(), filePath);
-  if (!resolved.startsWith(UPLOADS_DIR + path.sep)) return null;
-  return resolved;
-}
 
 export async function POST(req: NextRequest) {
   const { userId, error } = await requireSession();
@@ -72,12 +62,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'AI returned an empty dashboard config' }, { status: 500 });
     }
 
-    const absPath = resolveUploadPath(dataset.filePath);
-    if (!absPath) {
-      return NextResponse.json({ error: 'Invalid dataset file path' }, { status: 400 });
+    const csvRes = await fetch(dataset.filePath).catch(() => null);
+    if (!csvRes?.ok) {
+      return NextResponse.json({ error: 'Failed to retrieve dataset file' }, { status: 500 });
     }
-
-    const csvContent = await readFile(absPath, 'utf-8');
+    const csvContent = await csvRes.text();
     const { rows } = parseCSV(csvContent);
 
     const chartsWithData: (AIChart & { data: DataPoint[]; metricValue?: number })[] =

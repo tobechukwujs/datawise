@@ -1,19 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readFile } from 'fs/promises';
-import path from 'path';
 import { prisma } from '@/lib/prisma';
 import { parseCSV } from '@/lib/csv-parser';
 import { requireSession } from '@/lib/session';
 
 export const runtime = 'nodejs';
-
-const UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
-
-function resolveUploadPath(filePath: string): string | null {
-  const resolved = path.resolve(process.cwd(), filePath);
-  if (!resolved.startsWith(UPLOADS_DIR + path.sep)) return null;
-  return resolved;
-}
 
 export async function GET(
   _req: NextRequest,
@@ -39,12 +29,11 @@ export async function GET(
       return NextResponse.json({ error: 'No file associated with this dataset' }, { status: 400 });
     }
 
-    const absPath = resolveUploadPath(dataset.filePath);
-    if (!absPath) {
-      return NextResponse.json({ error: 'Invalid dataset file path' }, { status: 400 });
+    const res = await fetch(dataset.filePath);
+    if (!res.ok) {
+      return NextResponse.json({ error: 'Failed to retrieve CSV file' }, { status: 500 });
     }
-
-    const content = await readFile(absPath, 'utf-8');
+    const content = await res.text();
     const { rows } = parseCSV(content);
 
     return NextResponse.json({

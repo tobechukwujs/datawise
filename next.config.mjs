@@ -21,6 +21,7 @@ const required = [
   'NEXTAUTH_SECRET',
   'NEXTAUTH_URL',
   'ANTHROPIC_API_KEY',
+  'BLOB_READ_WRITE_TOKEN',
 ];
 
 for (const key of required) {

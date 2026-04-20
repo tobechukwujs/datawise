@@ -1,19 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { writeFile, mkdir, unlink } from 'fs/promises';
-import path from 'path';
+import { put, del } from '@vercel/blob';
 import { prisma } from '@/lib/prisma';
 import { parseCSV } from '@/lib/csv-parser';
 import { requireSession } from '@/lib/session';
 
 export const runtime = 'nodejs';
 
-const UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
-
 export async function POST(req: NextRequest) {
   const { userId, error } = await requireSession();
   if (error) return error;
 
-  let savedPath: string | null = null;
+  let blobUrl: string | null = null;
 
   try {
     const formData = await req.formData();
@@ -41,34 +38,27 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'CSV file is empty or has no data rows' }, { status: 400 });
     }
 
-    await mkdir(UPLOADS_DIR, { recursive: true });
-
-    // Sanitize: only allow safe characters, no dots that could traverse paths
     const baseName = file.name.replace(/\.csv$/i, '').replace(/[^a-z0-9_-]/gi, '_');
-    const filename = `${Date.now()}-${baseName}.csv`;
-    const absolutePath = path.join(UPLOADS_DIR, filename);
+    const filename = `csvs/${Date.now()}-${baseName}.csv`;
 
-    // Confirm resolved path stays within uploads dir
-    if (!absolutePath.startsWith(UPLOADS_DIR + path.sep)) {
-      return NextResponse.json({ error: 'Invalid filename' }, { status: 400 });
-    }
+    const blob = await put(filename, content, {
+      access: 'public',
+      contentType: 'text/csv',
+    });
+    blobUrl = blob.url;
 
-    await writeFile(absolutePath, content, 'utf-8');
-    savedPath = absolutePath;
-
-    const relPath = `uploads/${filename}`;
     const dataset = await prisma.dataset.create({
       data: {
         name: file.name.replace(/\.csv$/i, ''),
         source: 'csv',
-        filePath: relPath,
+        filePath: blob.url,
         columns: columns as object[],
         rowCount,
         userId,
       },
     });
 
-    savedPath = null; // ownership transferred to DB record
+    blobUrl = null; // ownership transferred to DB record
 
     return NextResponse.json({
       dataset: {
@@ -83,8 +73,7 @@ export async function POST(req: NextRequest) {
       preview: rows.slice(0, 5),
     });
   } catch (err) {
-    // Clean up file if DB write failed
-    if (savedPath) await unlink(savedPath).catch(() => null);
+    if (blobUrl) await del(blobUrl).catch(() => null);
     console.error('[POST /api/datasets/upload]', err);
     return NextResponse.json({ error: 'Failed to process CSV file' }, { status: 500 });
   }

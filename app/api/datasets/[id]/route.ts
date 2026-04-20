@@ -1,18 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { unlink } from 'fs/promises';
-import path from 'path';
+import { del } from '@vercel/blob';
 import { prisma } from '@/lib/prisma';
 import { requireSession } from '@/lib/session';
 
 export const runtime = 'nodejs';
-
-const UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
-
-function resolveUploadPath(filePath: string): string | null {
-  const resolved = path.resolve(process.cwd(), filePath);
-  if (!resolved.startsWith(UPLOADS_DIR + path.sep)) return null;
-  return resolved;
-}
 
 export async function GET(
   _req: NextRequest,
@@ -61,9 +52,8 @@ export async function DELETE(
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    if (dataset.filePath) {
-      const absPath = resolveUploadPath(dataset.filePath);
-      if (absPath) await unlink(absPath).catch(() => null);
+    if (dataset.filePath?.startsWith('https://')) {
+      await del(dataset.filePath).catch(() => null);
     }
 
     await prisma.dataset.delete({ where: { id: params.id } });

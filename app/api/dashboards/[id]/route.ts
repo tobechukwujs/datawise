@@ -1,6 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readFile } from 'fs/promises';
-import path from 'path';
 import { prisma } from '@/lib/prisma';
 import { parseCSV } from '@/lib/csv-parser';
 import { processChartData, computeMetric } from '@/lib/data-processor';
@@ -8,14 +6,6 @@ import { requireSession } from '@/lib/session';
 import type { ChartConfig, ChartWithData } from '@/types/dashboard';
 
 export const runtime = 'nodejs';
-
-const UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
-
-function resolveUploadPath(filePath: string): string | null {
-  const resolved = path.resolve(process.cwd(), filePath);
-  if (!resolved.startsWith(UPLOADS_DIR + path.sep)) return null;
-  return resolved;
-}
 
 export async function GET(
   _req: NextRequest,
@@ -43,9 +33,9 @@ export async function GET(
 
     let rows: Record<string, string>[] = [];
     if (dashboard.dataset.filePath) {
-      const absPath = resolveUploadPath(dashboard.dataset.filePath);
-      if (absPath) {
-        const csv = await readFile(absPath, 'utf-8').catch(() => '');
+      const res = await fetch(dashboard.dataset.filePath).catch(() => null);
+      if (res?.ok) {
+        const csv = await res.text();
         if (csv) ({ rows } = parseCSV(csv));
       }
     }
