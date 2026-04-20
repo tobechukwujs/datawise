@@ -1,0 +1,70 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id         String      @id @default(cuid())
+  email      String      @unique
+  name       String?
+  avatar     String?
+  provider   String
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  dashboards Dashboard[]
+  datasets   Dataset[]
+}
+
+model Dataset {
+  id         String      @id @default(cuid())
+  name       String
+  source     String
+  filePath   String?
+  connString String?
+  columns    Json
+  rowCount   Int
+  userId     String?
+  createdAt  DateTime    @default(now())
+  dashboards Dashboard[]
+  user       User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model Dashboard {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  prompt      String
+  config      Json
+  theme       String   @default("default")
+  isPublic    Boolean  @default(false)
+  shareSlug   String?  @unique
+  userId      String?
+  datasetId   String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  charts      Chart[]
+  dataset     Dataset  @relation(fields: [datasetId], references: [id])
+  user        User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([datasetId])
+  @@index([createdAt])
+}
+
+model Chart {
+  id          String    @id @default(cuid())
+  type        String
+  title       String
+  config      Json
+  position    Json
+  dashboardId String
+  dashboard   Dashboard @relation(fields: [dashboardId], references: [id], onDelete: Cascade)
+}
