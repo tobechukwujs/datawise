@@ -24,13 +24,13 @@ Browser
         ├── NextAuth.js  ──────────────► Supabase PostgreSQL (User table)
         ├── Prisma ORM   ──────────────► Supabase PostgreSQL (Dataset / Dashboard / Chart)
         ├── Anthropic SDK ─────────────► Claude API (dashboard generation)
-        └── Local filesystem ──────────► /uploads (CSV storage)
+        └── @vercel/blob ──────────────► Vercel Blob (CSV file storage)
 ```
 
 ### Key design decisions
 
-- **File storage on disk** — uploaded CSVs are stored in `/uploads` on the server filesystem. This works for single-instance deployments. For multi-instance or serverless, migrate to object storage (S3, Supabase Storage, Cloudflare R2).
-- **CSV re-parsed on every dashboard view** — chart data is not cached in the database. On each `GET /api/dashboards/[id]`, the CSV is read from disk and the aggregations are recomputed. This keeps the DB simple but adds latency for large files.
+- **File storage on Vercel Blob** — uploaded CSVs are stored as public blobs via `@vercel/blob`. The blob URL is stored in `Dataset.filePath`. For non-Vercel deployments, replace the `put`/`del` calls in `app/api/datasets/upload/route.ts` with an S3-compatible client.
+- **CSV re-fetched on every dashboard view** — chart data is not cached in the database. On each `GET /api/dashboards/[id]`, the CSV is fetched from its blob URL and the aggregations are recomputed. This keeps the DB simple but adds one network round-trip per request.
 - **Claude streams with adaptive thinking** — the generation endpoint uses `anthropic.messages.stream` with `thinking: { type: 'adaptive' }`. The thinking blocks are discarded; only the first text block is used.
 - **Zod validates the AI response** — the parsed JSON from Claude is validated against `AIResponseSchema` in `lib/anthropic.ts` before it is written to the database.
 
@@ -72,6 +72,10 @@ If the session is valid, `userId` is the authenticated user's DB ID. All subsequ
 
 Every mutable operation (read-by-id, delete) verifies that the resource's `userId` matches the session's `userId`. A mismatch returns `403 Forbidden`.
 
+### Supabase PgBouncer requirement
+
+`DATABASE_URL` must include `?pgbouncer=true`. Without it, Prisma uses named prepared statements which conflict with PgBouncer's connection pooling, causing `prepared statement "s0" already exists` errors (PostgreSQL error 42P05).
+
 ---
 
 ## Database Schema
@@ -97,7 +101,7 @@ Managed by Prisma. Source of truth: `prisma/schema.prisma`.
 | `id` | `String` (cuid) | Primary key |
 | `name` | `String` | Original filename without extension |
 | `source` | `String` | `"csv"` (future: `"postgres"`, `"mysql"`) |
-| `filePath` | `String?` | Relative path e.g. `uploads/1234-sales.csv` |
+| `filePath` | `String?` | Full Vercel Blob URL, e.g. `https://xxxx.public.blob.vercel-storage.com/csvs/...` |
 | `columns` | `Json` | Array of `ColumnMeta` objects |
 | `rowCount` | `Int` | Total data rows |
 | `userId` | `String?` | FK → User (Cascade delete) |
@@ -145,7 +149,7 @@ All endpoints require a valid session cookie. Unauthenticated requests return `4
 
 ### `POST /api/datasets/upload`
 
-Upload a CSV file and create a Dataset record.
+Upload a CSV file and create a Dataset record. The file is stored in Vercel Blob; the returned `filePath` is the full blob URL.
 
 **Request:** `multipart/form-data`
 
@@ -160,7 +164,7 @@ Upload a CSV file and create a Dataset record.
     "id": "clxyz...",
     "name": "sales_data",
     "source": "csv",
-    "filePath": "uploads/1234-sales_data.csv",
+    "filePath": "https://xxxx.public.blob.vercel-storage.com/csvs/1234-sales_data.csv",
     "columns": [ { "name": "Date", "type": "date", ... } ],
     "rowCount": 1500,
     "createdAt": "2026-04-20T..."
@@ -198,7 +202,7 @@ Fetch a single dataset's metadata.
 
 ### `DELETE /api/datasets/[id]`
 
-Delete a dataset and its associated CSV file from disk.
+Delete a dataset record and its associated blob from Vercel Blob storage.
 
 **Response `200`:** `{ "success": true }`
 
@@ -206,7 +210,7 @@ Delete a dataset and its associated CSV file from disk.
 
 ### `GET /api/datasets/[id]/preview`
 
-Return the first 100 rows of a dataset's CSV.
+Return the first 100 rows of a dataset's CSV. The CSV is fetched from its blob URL on each request.
 
 **Response `200`:**
 ```json
@@ -251,7 +255,7 @@ Generate a dashboard from a dataset and a natural-language prompt.
 }
 ```
 
-**Errors:** `400` (invalid body, missing dataset file), `403` (dataset not owned), `404` (dataset not found), `500` (Claude failure, CSV read failure)
+**Errors:** `400` (invalid body, dataset has no file), `403` (dataset not owned), `404` (dataset not found), `500` (Claude failure, blob fetch failure)
 
 ---
 
@@ -277,12 +281,12 @@ List all dashboards belonging to the authenticated user.
 
 ### `GET /api/dashboards/[id]`
 
-Fetch a dashboard with fully-processed chart data (reads and re-aggregates the CSV).
+Fetch a dashboard with fully-processed chart data. The CSV is fetched from Vercel Blob and aggregations are recomputed on each request.
 
 **Response `200`:**
 ```json
 {
-  "dashboard": { "id": "...", "title": "...", "dataset": { "name": "...", "filePath": "...", "rowCount": ... }, ... },
+  "dashboard": { "id": "...", "title": "...", "dataset": { "name": "...", "filePath": "https://...", "rowCount": ... }, ... },
   "charts": [ { "id": "...", "type": "...", "data": [...], "metricValue": 95000 } ]
 }
 ```
@@ -359,6 +363,10 @@ User prompt + ColumnMeta[]
   DashboardAIResponse
         │
         ▼
+  fetch(dataset.filePath)        ← Vercel Blob URL
+  parseCSV() → rows[]
+        │
+        ▼
   processChartData() / computeMetric()   ← lib/data-processor.ts
   (applies aggregations against CSV rows)
         │
@@ -427,21 +435,21 @@ Charts use a 12-column grid. Each chart has a `position: { x, y, w, h }` where:
 | Unauthenticated page access | NextAuth `withAuth` middleware redirects to `/login` |
 | Unauthenticated API access | `requireSession()` returns `401` before any DB query |
 | Accessing another user's data | `userId` ownership check returns `403` |
-| Path traversal via `filePath` | `resolveUploadPath()` validates the resolved path starts with the absolute `uploads/` dir |
 | Oversized AI prompts | Zod schema caps `prompt` at 2000 characters |
 | Malformed request bodies | `req.json()` wrapped in try/catch; Zod validates all fields |
 | Invalid AI responses | Zod `AIResponseSchema` validates structure before DB write |
-| Secrets in git | `.gitignore` blocks `.env` and all `.env.*` files (except `.env.example`) |
+| Secrets in git | `.gitignore` blocks `.env` and all `.env.*` files |
 | Clickjacking | `X-Frame-Options: DENY` header |
 | MIME sniffing | `X-Content-Type-Options: nosniff` header |
 | Missing env vars | `next.config.mjs` throws at startup if any required variable is absent |
-| Orphaned upload on DB failure | `lib/datasets/upload/route.ts` deletes the saved file in a `finally` block if the Prisma create fails |
+| Orphaned blob on DB failure | Upload route calls `del(blobUrl)` in a `finally`-style catch if Prisma create fails |
+| PgBouncer prepared statement conflicts | `DATABASE_URL` includes `?pgbouncer=true` |
 
 ### What's not yet protected
 
 | Gap | Recommendation |
 |---|---|
 | No rate limiting | Add Upstash Ratelimit on `/api/datasets/upload` and `/api/dashboards/generate` |
-| CSV stored on local disk | Migrate to S3 / Supabase Storage for multi-instance deployments |
+| Blob URLs are publicly accessible | Vercel Blob `access: 'public'` means URLs are unguessable but not authenticated. For stricter privacy, generate short-lived download tokens via `@vercel/blob` `generateClientTokens` or migrate to private blobs. |
 | No error monitoring | Integrate Sentry or similar |
-| CSV re-parsed on every request | Cache processed chart data in the DB or use Redis |
+| CSV re-fetched on every request | Cache processed chart data in the DB or use Redis |
